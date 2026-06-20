@@ -44,7 +44,24 @@
     }
     .btn:hover { background: #1565c0; }
     .btn.active { background: #c62828; }
+    .filter-btn.active { background: #00897b; }
     #controls { display: flex; gap: 8px; flex-wrap: wrap; }
+
+    #legend {
+      position: absolute;
+      bottom: 34px;
+      left: 12px;
+      z-index: 500;
+      background: rgba(22,33,62,0.92);
+      border: 1px solid #0f3460;
+      border-radius: 10px;
+      padding: 10px 12px;
+      font-size: 12px;
+      color: #e3f2fd;
+      line-height: 1.8;
+    }
+    #legend b { display: block; margin-bottom: 4px; font-size: 11px; color: #90a4ae; text-transform: uppercase; letter-spacing: 0.5px; }
+    #legend .dot { display: inline-block; width: 11px; height: 11px; border-radius: 50%; margin-right: 6px; vertical-align: middle; border: 1px solid #fff; }
 
     #map { flex: 1; }
 
@@ -117,12 +134,25 @@
   <h1>Pothole Mapper</h1>
   <span id="counter">Loading…</span>
   <div id="controls">
+    <button class="btn filter-btn active" data-filter="all" onclick="setFilter('all')">All</button>
+    <button class="btn filter-btn" data-filter="minor" onclick="setFilter('minor')">🟢 Minor</button>
+    <button class="btn filter-btn" data-filter="moderate" onclick="setFilter('moderate')">🟡 Moderate</button>
+    <button class="btn filter-btn" data-filter="severe" onclick="setFilter('severe')">🔴 Severe</button>
+    <button class="btn" id="locate-btn" onclick="locateMe()">🎯 Locate Me</button>
     <button class="btn" id="toggle-heat-btn" onclick="toggleHeat()">🔥 Heatmap</button>
-    <button class="btn" id="export-btn" onclick="exportGeoJSON()">⬇ Export GeoJSON</button>
+    <button class="btn" id="export-btn" onclick="exportGeoJSON()">⬇ GeoJSON</button>
+    <button class="btn" id="csv-btn" onclick="exportCSV()">⬇ CSV</button>
   </div>
 </div>
 
-<div id="map"></div>
+<div id="map">
+  <div id="legend">
+    <b>Severity</b>
+    <span class="dot" style="background:#00e676"></span>Minor (&lt;30%)<br/>
+    <span class="dot" style="background:#ffea00"></span>Moderate (30–60%)<br/>
+    <span class="dot" style="background:#ff1744"></span>Severe (&gt;60%)
+  </div>
+</div>
 
 <div id="footer">
   <span id="last-detection">No detections yet</span>
@@ -170,29 +200,83 @@ function formatTs(ts) {
   return isNaN(d) ? ts : d.toLocaleString();
 }
 
-function addOrUpdateMarker(id, data) {
-  allPotholes[id] = data;
-  const existing = markerLayer.getLayers().find(l => l._potholeId === id);
-  if (existing) markerLayer.removeLayer(existing);
+let severityFilter = 'all'; // all | minor | moderate | severe
 
+function passesFilter(d) {
+  const s = d.severity ?? 0;
+  if (severityFilter === 'minor') return s < 0.3;
+  if (severityFilter === 'moderate') return s >= 0.3 && s < 0.6;
+  if (severityFilter === 'severe') return s >= 0.6;
+  return true; // all
+}
+
+function buildMarker(id, data) {
   const m = L.marker([data.lat, data.lon], { icon: makeIcon(data.severity ?? 0) });
   m._potholeId = id;
   const imgHtml = data.image
     ? `<img src="data:image/jpeg;base64,${data.image}" style="width:200px;max-width:100%;border-radius:6px;display:block;margin-bottom:6px;" />`
     : '';
+  const roadHtml = data.road ? `📍 <b>${data.road}</b><br/>` : '';
   m.bindPopup(`
     ${imgHtml}
     <b>Pothole</b><br/>
+    ${roadHtml}
     Severity: <b>${((data.severity ?? 0) * 100).toFixed(0)}%</b><br/>
     Confidence: <b>${((data.confidence ?? 0) * 100).toFixed(0)}%</b><br/>
     Seen: <b>${data.count ?? 1}×</b><br/>
     ${formatTs(data.timestamp)}
   `, { maxWidth: 240 });
-  markerLayer.addLayer(m);
+  return m;
+}
 
-  // Update last detection footer
+function addOrUpdateMarker(id, data) {
+  allPotholes[id] = data;
+  const existing = markerLayer.getLayers().find(l => l._potholeId === id);
+  if (existing) markerLayer.removeLayer(existing);
+
+  if (passesFilter(data)) markerLayer.addLayer(buildMarker(id, data));
+
   document.getElementById('last-detection').textContent =
     'Last detection: ' + formatTs(data.timestamp);
+}
+
+function renderMarkers() {
+  markerLayer.clearLayers();
+  Object.entries(allPotholes).forEach(([id, d]) => {
+    if (passesFilter(d)) markerLayer.addLayer(buildMarker(id, d));
+  });
+}
+
+function setFilter(f) {
+  severityFilter = f;
+  if (!heatVisible) renderMarkers();
+  document.querySelectorAll('.filter-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.filter === f);
+  });
+}
+
+function locateMe() {
+  if (!navigator.geolocation) return alert('Geolocation not supported by this browser.');
+  navigator.geolocation.getCurrentPosition(
+    (pos) => map.setView([pos.coords.latitude, pos.coords.longitude], 16),
+    () => alert('Could not get your location.')
+  );
+}
+
+function exportCSV() {
+  const rows = [['id', 'lat', 'lon', 'severity', 'confidence', 'count', 'road', 'timestamp']];
+  Object.entries(allPotholes).forEach(([id, d]) => {
+    rows.push([
+      id, d.lat, d.lon, d.severity ?? '', d.confidence ?? '',
+      d.count ?? 1, (d.road ?? '').replace(/,/g, ' '), d.timestamp ?? '',
+    ]);
+  });
+  const csv = rows.map(r => r.join(',')).join('\n');
+  const blob = new Blob([csv], { type: 'text/csv' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'potholes.csv';
+  a.click();
 }
 
 function refreshCounter() {
