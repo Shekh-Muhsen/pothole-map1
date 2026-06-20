@@ -63,11 +63,12 @@
       position: fixed;
       inset: 0;
       background: rgba(0,0,0,0.85);
-      display: flex;
+      display: none;            /* hidden by default — only shown if auto-connect fails */
       align-items: center;
       justify-content: center;
       z-index: 9999;
     }
+    #config-overlay.visible { display: flex; }
     #config-box {
       background: #16213e;
       border-radius: 14px;
@@ -249,7 +250,10 @@ function connectFirebase() {
   const appId      = document.getElementById('f-appId').value.trim();
   const errEl      = document.getElementById('config-err');
 
+  const overlay = document.getElementById('config-overlay');
+
   if (!apiKey || !projectId || !authDomain || !appId) {
+    overlay.classList.add('visible');
     errEl.textContent = 'Please fill in all fields.';
     errEl.style.display = 'block';
     return;
@@ -263,12 +267,13 @@ function connectFirebase() {
       firebase.initializeApp({ apiKey, projectId, authDomain, appId });
     }
   } catch (e) {
+    overlay.classList.add('visible');
     errEl.textContent = 'Firebase init error: ' + e.message;
     errEl.style.display = 'block';
     return;
   }
 
-  document.getElementById('config-overlay').style.display = 'none';
+  overlay.classList.remove('visible');
   startListening();
 }
 
