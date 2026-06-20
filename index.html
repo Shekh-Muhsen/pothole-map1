@@ -177,13 +177,17 @@ function addOrUpdateMarker(id, data) {
 
   const m = L.marker([data.lat, data.lon], { icon: makeIcon(data.severity ?? 0) });
   m._potholeId = id;
+  const imgHtml = data.image
+    ? `<img src="data:image/jpeg;base64,${data.image}" style="width:200px;max-width:100%;border-radius:6px;display:block;margin-bottom:6px;" />`
+    : '';
   m.bindPopup(`
+    ${imgHtml}
     <b>Pothole</b><br/>
     Severity: <b>${((data.severity ?? 0) * 100).toFixed(0)}%</b><br/>
     Confidence: <b>${((data.confidence ?? 0) * 100).toFixed(0)}%</b><br/>
     Seen: <b>${data.count ?? 1}×</b><br/>
     ${formatTs(data.timestamp)}
-  `);
+  `, { maxWidth: 240 });
   markerLayer.addLayer(m);
 
   // Update last detection footer
