@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Pothole Map</title>
+
+  <!-- Leaflet -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <!-- Leaflet.heat -->
+  <script src="https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>
+  <!-- Firebase -->
+  <script src="https://www.gstatic.com/firebasejs/10.0.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.0.0/firebase-firestore-compat.js"></script>
+
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'Segoe UI', sans-serif; background: #1a1a2e; color: #e3f2fd; height: 100vh; display: flex; flex-direction: column; }
+
+    #header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 10px 16px;
+      background: #16213e;
+      border-bottom: 1px solid #0f3460;
+      flex-shrink: 0;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    #header h1 { font-size: 18px; font-weight: 800; letter-spacing: 1px; }
+    #counter { font-size: 14px; color: #90caf9; font-weight: 700; }
+    .btn {
+      background: #0d47a1;
+      color: #e3f2fd;
+      border: none;
+      padding: 7px 16px;
+      border-radius: 20px;
+      cursor: pointer;
+      font-size: 13px;
+      font-weight: 700;
+      transition: background 0.2s;
+    }
+    .btn:hover { background: #1565c0; }
+    .btn.active { background: #c62828; }
+    #controls { display: flex; gap: 8px; flex-wrap: wrap; }
+
+    #map { flex: 1; }
+
+    #footer {
+      background: rgba(22,33,62,0.95);
+      padding: 6px 16px;
+      font-size: 12px;
+      color: #78909c;
+      flex-shrink: 0;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    #config-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.85);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 9999;
+    }
+    #config-box {
+      background: #16213e;
+      border-radius: 14px;
+      padding: 32px;
+      width: 420px;
+      max-width: 95vw;
+      border: 1px solid #0f3460;
+    }
+    #config-box h2 { font-size: 20px; margin-bottom: 8px; }
+    #config-box p { color: #90a4ae; font-size: 13px; margin-bottom: 24px; line-height: 1.6; }
+    .field { margin-bottom: 14px; }
+    .field label { display: block; font-size: 12px; color: #90a4ae; margin-bottom: 5px; }
+    .field input {
+      width: 100%;
+      background: #1a1a2e;
+      border: 1px solid #0f3460;
+      color: #e3f2fd;
+      border-radius: 8px;
+      padding: 9px 12px;
+      font-size: 14px;
+      outline: none;
+    }
+    .field input:focus { border-color: #1565c0; }
+    #connect-btn { width: 100%; padding: 12px; font-size: 15px; margin-top: 8px; border-radius: 10px; }
+    #config-err { color: #ef9a9a; font-size: 13px; margin-top: 10px; display: none; }
+  </style>
+</head>
+<body>
+
+<!-- Firebase config modal -->
+<div id="config-overlay">
+  <div id="config-box">
+    <h2>🗺 Pothole Map</h2>
+    <p>Enter your Firebase project config to connect to the live pothole database.
+       Find it in Firebase Console → Project Settings → Your Apps → Web App → SDK setup.</p>
+    <div class="field"><label>API Key</label><input id="f-apiKey" placeholder="AIza..." /></div>
+    <div class="field"><label>Project ID</label><input id="f-projectId" placeholder="your-project-id" /></div>
+    <div class="field"><label>Auth Domain</label><input id="f-authDomain" placeholder="your-project-id.firebaseapp.com" /></div>
+    <div class="field"><label>App ID</label><input id="f-appId" placeholder="1:123456:web:abc..." /></div>
+    <button class="btn" id="connect-btn" onclick="connectFirebase()">Connect</button>
+    <div id="config-err"></div>
+  </div>
+</div>
+
+<div id="header">
+  <h1>Pothole Mapper</h1>
+  <span id="counter">Loading…</span>
+  <div id="controls">
+    <button class="btn" id="toggle-heat-btn" onclick="toggleHeat()">🔥 Heatmap</button>
+    <button class="btn" id="export-btn" onclick="exportGeoJSON()">⬇ Export GeoJSON</button>
+  </div>
+</div>
+
+<div id="map"></div>
+
+<div id="footer">
+  <span id="last-detection">No detections yet</span>
+  <span>Data: Firebase Firestore — updates in real time</span>
+</div>
+
+<script>
+// ─── Map init ────────────────────────────────────────────────────────────────
+const map = L.map('map').setView([20, 0], 3);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  attribution: '© OpenStreetMap contributors',
+  maxZoom: 19,
+}).addTo(map);
+
+const markerLayer = L.layerGroup().addTo(map);
+let heatLayer = null;
+let heatVisible = false;
+let allPotholes = {}; // id → data
+let unsubscribe = null;
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+function severityColor(s) {
+  if (s < 0.3) return '#00e676';
+  if (s < 0.6) return '#ffea00';
+  return '#ff1744';
+}
+
+function makeIcon(severity) {
+  const color = severityColor(severity);
+  return L.divIcon({
+    className: '',
+    html: `<div style="
+      width:14px;height:14px;border-radius:50%;
+      background:${color};border:2px solid #fff;
+      box-shadow:0 0 6px ${color};
+    "></div>`,
+    iconSize: [14, 14],
+    iconAnchor: [7, 7],
+  });
+}
+
+function formatTs(ts) {
+  if (!ts) return 'unknown';
+  const d = new Date(ts);
+  return isNaN(d) ? ts : d.toLocaleString();
+}
+
+function addOrUpdateMarker(id, data) {
+  allPotholes[id] = data;
+  const existing = markerLayer.getLayers().find(l => l._potholeId === id);
+  if (existing) markerLayer.removeLayer(existing);
+
+  const m = L.marker([data.lat, data.lon], { icon: makeIcon(data.severity ?? 0) });
+  m._potholeId = id;
+  m.bindPopup(`
+    <b>Pothole</b><br/>
+    Severity: <b>${((data.severity ?? 0) * 100).toFixed(0)}%</b><br/>
+    Confidence: <b>${((data.confidence ?? 0) * 100).toFixed(0)}%</b><br/>
+    Seen: <b>${data.count ?? 1}×</b><br/>
+    ${formatTs(data.timestamp)}
+  `);
+  markerLayer.addLayer(m);
+
+  // Update last detection footer
+  document.getElementById('last-detection').textContent =
+    'Last detection: ' + formatTs(data.timestamp);
+}
+
+function refreshCounter() {
+  const n = Object.keys(allPotholes).length;
+  document.getElementById('counter').textContent = `${n} pothole${n !== 1 ? 's' : ''}`;
+}
+
+function rebuildHeat() {
+  if (heatLayer) { map.removeLayer(heatLayer); heatLayer = null; }
+  const pts = Object.values(allPotholes).map(d => [d.lat, d.lon, d.severity ?? 0.5]);
+  heatLayer = L.heatLayer(pts, { radius: 25, blur: 20, maxZoom: 17 });
+  if (heatVisible) heatLayer.addTo(map);
+}
+
+// ─── Toggle heatmap ───────────────────────────────────────────────────────────
+function toggleHeat() {
+  heatVisible = !heatVisible;
+  const btn = document.getElementById('toggle-heat-btn');
+  if (heatVisible) {
+    rebuildHeat();
+    markerLayer.remove();
+    btn.classList.add('active');
+    btn.textContent = '📍 Markers';
+  } else {
+    if (heatLayer) { map.removeLayer(heatLayer); heatLayer = null; }
+    markerLayer.addTo(map);
+    btn.classList.remove('active');
+    btn.textContent = '🔥 Heatmap';
+  }
+}
+
+// ─── Export GeoJSON ───────────────────────────────────────────────────────────
+function exportGeoJSON() {
+  const features = Object.entries(allPotholes).map(([id, d]) => ({
+    type: 'Feature',
+    geometry: { type: 'Point', coordinates: [d.lon, d.lat] },
+    properties: {
+      id,
+      severity: d.severity,
+      confidence: d.confidence,
+      count: d.count,
+      timestamp: d.timestamp,
+      device_id: d.device_id,
+    },
+  }));
+  const geojson = { type: 'FeatureCollection', features };
+  const blob = new Blob([JSON.stringify(geojson, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'potholes.geojson';
+  a.click();
+}
+
+// ─── Firebase connect ─────────────────────────────────────────────────────────
+function connectFirebase() {
+  const apiKey     = document.getElementById('f-apiKey').value.trim();
+  const projectId  = document.getElementById('f-projectId').value.trim();
+  const authDomain = document.getElementById('f-authDomain').value.trim();
+  const appId      = document.getElementById('f-appId').value.trim();
+  const errEl      = document.getElementById('config-err');
+
+  if (!apiKey || !projectId || !authDomain || !appId) {
+    errEl.textContent = 'Please fill in all fields.';
+    errEl.style.display = 'block';
+    return;
+  }
+
+  errEl.style.display = 'none';
+  localStorage.setItem('phm_firebase', JSON.stringify({ apiKey, projectId, authDomain, appId }));
+
+  try {
+    if (!firebase.apps.length) {
+      firebase.initializeApp({ apiKey, projectId, authDomain, appId });
+    }
+  } catch (e) {
+    errEl.textContent = 'Firebase init error: ' + e.message;
+    errEl.style.display = 'block';
+    return;
+  }
+
+  document.getElementById('config-overlay').style.display = 'none';
+  startListening();
+}
+
+function startListening() {
+  const db = firebase.firestore();
+  if (unsubscribe) unsubscribe();
+
+  // Load all existing docs first, then listen for changes
+  unsubscribe = db.collection('potholes')
+    .orderBy('created_at', 'desc')
+    .onSnapshot((snap) => {
+      snap.docChanges().forEach(change => {
+        const id = change.doc.id;
+        if (change.type === 'removed') {
+          delete allPotholes[id];
+          const m = markerLayer.getLayers().find(l => l._potholeId === id);
+          if (m) markerLayer.removeLayer(m);
+        } else {
+          addOrUpdateMarker(id, change.doc.data());
+        }
+      });
+      refreshCounter();
+      if (heatVisible) rebuildHeat();
+
+      // Auto-fit on first load
+      if (Object.keys(allPotholes).length > 0 && !map._firstFitDone) {
+        map._firstFitDone = true;
+        const lls = Object.values(allPotholes).map(d => [d.lat, d.lon]);
+        if (lls.length === 1) {
+          map.setView(lls[0], 15);
+        } else {
+          map.fitBounds(L.latLngBounds(lls), { padding: [40, 40] });
+        }
+      }
+    }, (err) => {
+      console.error('Firestore error:', err);
+    });
+}
+
+// ─── Project config (pre-filled) ─────────────────────────────────────────────
+const PROJECT_CONFIG = {
+  apiKey:     'AIzaSyCQK3tO9qwCdMqshv_1Yvx88oqxXwMwJAM',
+  projectId:  'potholes-free',
+  authDomain: 'potholes-free.firebaseapp.com',
+  appId:      '1:383367748458:web:8cb3f9e7befa418192e313',
+};
+
+// ─── Auto-connect ─────────────────────────────────────────────────────────────
+(function tryAutoConnect() {
+  // Use saved config if present, otherwise fall back to project defaults
+  let c = PROJECT_CONFIG;
+  try {
+    const saved = localStorage.getItem('phm_firebase');
+    if (saved) c = { ...c, ...JSON.parse(saved) };
+  } catch (_) {}
+
+  document.getElementById('f-apiKey').value    = c.apiKey    ?? '';
+  document.getElementById('f-projectId').value = c.projectId ?? '';
+  document.getElementById('f-authDomain').value= c.authDomain?? '';
+  document.getElementById('f-appId').value     = c.appId     ?? '';
+
+  // Small delay so Firebase CDN scripts finish loading
+  setTimeout(connectFirebase, 300);
+})();
+</script>
+</body>
+</html>
